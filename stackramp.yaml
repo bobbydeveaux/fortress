@@ -1,0 +1,9 @@
+name: fortress
+
+domain: fortress.stackramp.io
+
+frontend:
+  framework: react
+  dir: site
+
+database: false

@@ -1,0 +1,314 @@
+package mcp
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+
+	"github.com/bobbydeveaux/fortress/internal/embedder"
+	"github.com/bobbydeveaux/fortress/internal/store"
+)
+
+type Server struct {
+	store    store.Store
+	embedder embedder.Embedder
+}
+
+func NewServer(s store.Store, emb embedder.Embedder) *Server {
+	return &Server{store: s, embedder: emb}
+}
+
+type jsonRPCRequest struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+}
+
+type jsonRPCResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Result  interface{}     `json:"result,omitempty"`
+	Error   *jsonRPCError   `json:"error,omitempty"`
+}
+
+type jsonRPCError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+type toolDef struct {
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	InputSchema interface{} `json:"inputSchema"`
+}
+
+func (s *Server) Serve(ctx context.Context) error {
+	sc := bufio.NewScanner(os.Stdin)
+	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
+	enc := json.NewEncoder(os.Stdout)
+
+	for sc.Scan() {
+		var req jsonRPCRequest
+		if err := json.Unmarshal(sc.Bytes(), &req); err != nil {
+			continue
+		}
+
+		resp := s.handle(ctx, req)
+		if err := enc.Encode(resp); err != nil {
+			return fmt.Errorf("encoding response: %w", err)
+		}
+	}
+
+	return sc.Err()
+}
+
+func (s *Server) handle(ctx context.Context, req jsonRPCRequest) jsonRPCResponse {
+	switch req.Method {
+	case "initialize":
+		return s.handleInitialize(req)
+	case "tools/list":
+		return s.handleToolsList(req)
+	case "tools/call":
+		return s.handleToolsCall(ctx, req)
+	default:
+		return jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result:  map[string]interface{}{},
+		}
+	}
+}
+
+func (s *Server) handleInitialize(req jsonRPCRequest) jsonRPCResponse {
+	return jsonRPCResponse{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Result: map[string]interface{}{
+			"protocolVersion": "2024-11-05",
+			"capabilities": map[string]interface{}{
+				"tools": map[string]interface{}{},
+			},
+			"serverInfo": map[string]interface{}{
+				"name":    "fortress",
+				"version": "1.0.0",
+			},
+		},
+	}
+}
+
+func (s *Server) handleToolsList(req jsonRPCRequest) jsonRPCResponse {
+	tools := []toolDef{
+		{
+			Name:        "search",
+			Description: "Semantic search across the indexed codebase knowledge base",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"query": map[string]interface{}{"type": "string", "description": "Natural language search query"},
+					"limit": map[string]interface{}{"type": "integer", "default": 5, "description": "Number of results"},
+				},
+				"required": []string{"query"},
+			},
+		},
+		{
+			Name:        "list_categories",
+			Description: "List all categories discovered in the indexed codebase",
+			InputSchema: map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{},
+			},
+		},
+		{
+			Name:        "get_document",
+			Description: "Retrieve a specific indexed document by file path",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{"type": "string", "description": "Relative file path"},
+				},
+				"required": []string{"path"},
+			},
+		},
+		{
+			Name:        "get_stats",
+			Description: "Get statistics about what Jor-El knows",
+			InputSchema: map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{},
+			},
+		},
+	}
+
+	return jsonRPCResponse{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Result:  map[string]interface{}{"tools": tools},
+	}
+}
+
+func (s *Server) handleToolsCall(ctx context.Context, req jsonRPCRequest) jsonRPCResponse {
+	var params struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return errorResponse(req.ID, -32602, "Invalid params")
+	}
+
+	switch params.Name {
+	case "search":
+		return s.toolSearch(ctx, req.ID, params.Arguments)
+	case "list_categories":
+		return s.toolListCategories(ctx, req.ID)
+	case "get_document":
+		return s.toolGetDocument(ctx, req.ID, params.Arguments)
+	case "get_stats":
+		return s.toolGetStats(ctx, req.ID)
+	default:
+		return errorResponse(req.ID, -32601, "Unknown tool: "+params.Name)
+	}
+}
+
+func (s *Server) toolSearch(ctx context.Context, id json.RawMessage, args json.RawMessage) jsonRPCResponse {
+	var input struct {
+		Query string `json:"query"`
+		Limit int    `json:"limit"`
+	}
+	json.Unmarshal(args, &input)
+	if input.Limit <= 0 {
+		input.Limit = 5
+	}
+
+	vecs, err := s.embedder.Embed(ctx, []string{input.Query})
+	if err != nil {
+		return errorResponse(id, -32000, "Embedding error: "+err.Error())
+	}
+
+	results, err := s.store.Search(ctx, vecs[0], input.Limit)
+	if err != nil {
+		return errorResponse(id, -32000, "Search error: "+err.Error())
+	}
+
+	type resultItem struct {
+		Content   string  `json:"content"`
+		File      string  `json:"file"`
+		Repo      string  `json:"repo"`
+		Category  string  `json:"category"`
+		Score     float32 `json:"score"`
+		LineStart int     `json:"line_start"`
+		LineEnd   int     `json:"line_end"`
+	}
+
+	items := make([]resultItem, len(results))
+	for i, r := range results {
+		items[i] = resultItem{
+			Content:   r.Chunk.Content,
+			File:      r.Chunk.Metadata.Path,
+			Repo:      r.Chunk.Metadata.Repo,
+			Category:  string(r.Chunk.Metadata.Category),
+			Score:     r.Score,
+			LineStart: r.Chunk.StartLine,
+			LineEnd:   r.Chunk.EndLine,
+		}
+	}
+
+	content, _ := json.Marshal(items)
+	return jsonRPCResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result: map[string]interface{}{
+			"content": []map[string]interface{}{
+				{"type": "text", "text": string(content)},
+			},
+		},
+	}
+}
+
+func (s *Server) toolListCategories(ctx context.Context, id json.RawMessage) jsonRPCResponse {
+	cats, err := s.store.ListCategories(ctx)
+	if err != nil {
+		return errorResponse(id, -32000, "Error: "+err.Error())
+	}
+
+	content, _ := json.Marshal(cats)
+	return jsonRPCResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result: map[string]interface{}{
+			"content": []map[string]interface{}{
+				{"type": "text", "text": string(content)},
+			},
+		},
+	}
+}
+
+func (s *Server) toolGetDocument(ctx context.Context, id json.RawMessage, args json.RawMessage) jsonRPCResponse {
+	var input struct {
+		Path string `json:"path"`
+	}
+	json.Unmarshal(args, &input)
+
+	doc, chunks, err := s.store.GetDocument(ctx, input.Path)
+	if err != nil {
+		return errorResponse(id, -32000, "Not found: "+err.Error())
+	}
+
+	type chunkItem struct {
+		Content   string `json:"content"`
+		StartLine int    `json:"start_line"`
+		EndLine   int    `json:"end_line"`
+	}
+
+	chunkItems := make([]chunkItem, len(chunks))
+	for i, c := range chunks {
+		chunkItems[i] = chunkItem{Content: c.Content, StartLine: c.StartLine, EndLine: c.EndLine}
+	}
+
+	result := map[string]interface{}{
+		"path":     doc.RelPath,
+		"content":  doc.Content,
+		"category": string(doc.Category),
+		"language": doc.Language,
+		"chunks":   chunkItems,
+	}
+
+	content, _ := json.Marshal(result)
+	return jsonRPCResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result: map[string]interface{}{
+			"content": []map[string]interface{}{
+				{"type": "text", "text": string(content)},
+			},
+		},
+	}
+}
+
+func (s *Server) toolGetStats(ctx context.Context, id json.RawMessage) jsonRPCResponse {
+	stats, err := s.store.GetStats(ctx)
+	if err != nil {
+		return errorResponse(id, -32000, "Error: "+err.Error())
+	}
+
+	content, _ := json.Marshal(stats)
+	return jsonRPCResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result: map[string]interface{}{
+			"content": []map[string]interface{}{
+				{"type": "text", "text": string(content)},
+			},
+		},
+	}
+}
+
+func errorResponse(id json.RawMessage, code int, message string) jsonRPCResponse {
+	return jsonRPCResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Error:   &jsonRPCError{Code: code, Message: message},
+	}
+}

@@ -1,0 +1,88 @@
+# Fortress configuration
+embedder: ollama
+
+ollama:
+  url: http://localhost:11434
+  embed_model: nomic-embed-text
+  chat_model: llama3.2
+
+openai:
+  api_key: ""
+  embed_model: text-embedding-3-small
+
+chat_llm: ollama
+
+claude:
+  api_key: ""
+  model: claude-sonnet-4-6
+
+ignore:
+  - .git
+  - node_modules
+  - vendor
+  - .venv
+  - __pycache__
+  - "*.bin"
+  - "*.exe"
+  - "*.so"
+  - "*.dylib"
+  - dist
+  - build
+  - coverage
+  - .fortress
+  - "*.lock"
+  - "*.sum"
+  - package-lock.json
+  - yarn.lock
+  - pnpm-lock.yaml
+  - go.sum
+  - "*.min.js"
+  - "*.min.css"
+  - "*.map"
+  - "*.svg"
+  - "*.png"
+  - "*.jpg"
+  - "*.jpeg"
+  - "*.gif"
+  - "*.ico"
+  - "*.woff"
+  - "*.woff2"
+  - "*.ttf"
+  - "*.eot"
+  - "*.pdf"
+  - "*.zip"
+  - "*.tar.gz"
+  - "*.jar"
+  - .terraform
+  - .next
+  - .nuxt
+  - .cache
+  - target
+  - "*.pyc"
+  - "*.class"
+  - .idea
+  - .vscode
+  - .DS_Store
+  - "*.xlsx"
+  - "*.xls"
+  - "*.csv"
+  - "*.jsonl"
+  - "*.parquet"
+  - "*.avro"
+  - "*.pb"
+  - "*.tfstate"
+  - "*.tfstate.backup"
+
+chunk_size: 512
+chunk_overlap: 64
+
+db_path: .fortress/jor-el.db
+docs_path: .fortress/docs/
+
+cloud_storage: ""
+
+ui_port: 8080
+ui_bind: 127.0.0.1
+
+embed_workers: 4
+embed_batch_size: 32

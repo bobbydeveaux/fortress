@@ -1,0 +1,25 @@
+# Binaries
+fortress
+*.exe
+*.dylib
+*.so
+
+# Go
+vendor/
+
+# Node (site)
+site/node_modules/
+site/dist/
+
+# Database
+.fortress/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
