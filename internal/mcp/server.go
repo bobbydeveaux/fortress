@@ -179,17 +179,31 @@ func (s *Server) toolSearch(ctx context.Context, id json.RawMessage, args json.R
 	}
 	json.Unmarshal(args, &input)
 	if input.Limit <= 0 {
-		input.Limit = 5
+		input.Limit = 10
 	}
 
+	// Vector search with FTS fallback
+	var results []store.SearchResult
 	vecs, err := s.embedder.Embed(ctx, []string{input.Query})
-	if err != nil {
-		return errorResponse(id, -32000, "Embedding error: "+err.Error())
+	if err == nil {
+		results, _ = s.store.Search(ctx, vecs[0], input.Limit)
 	}
 
-	results, err := s.store.Search(ctx, vecs[0], input.Limit)
-	if err != nil {
-		return errorResponse(id, -32000, "Search error: "+err.Error())
+	// Fallback to FTS if vector search returned nothing
+	if len(results) == 0 {
+		results, _ = s.store.SearchFTS(ctx, input.Query, input.Limit)
+	}
+
+	if len(results) == 0 {
+		return jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      id,
+			Result: map[string]interface{}{
+				"content": []map[string]interface{}{
+					{"type": "text", "text": "No results found for: " + input.Query},
+				},
+			},
+		}
 	}
 
 	type resultItem struct {

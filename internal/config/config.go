@@ -9,7 +9,8 @@ type Config struct {
 	Ollama   OllamaConfig `mapstructure:"ollama"`
 	OpenAI   OpenAIConfig `mapstructure:"openai"`
 	ChatLLM  string       `mapstructure:"chat_llm"`
-	Claude   ClaudeConfig `mapstructure:"claude"`
+	Claude   ClaudeConfig  `mapstructure:"claude"`
+	MiniMax  MiniMaxConfig `mapstructure:"minimax"`
 
 	Ignore []string `mapstructure:"ignore"`
 
@@ -37,9 +38,15 @@ type OllamaConfig struct {
 type OpenAIConfig struct {
 	APIKey     string `mapstructure:"api_key"`
 	EmbedModel string `mapstructure:"embed_model"`
+	ChatModel  string `mapstructure:"chat_model"`
 }
 
 type ClaudeConfig struct {
+	APIKey string `mapstructure:"api_key"`
+	Model  string `mapstructure:"model"`
+}
+
+type MiniMaxConfig struct {
 	APIKey string `mapstructure:"api_key"`
 	Model  string `mapstructure:"model"`
 }
@@ -54,10 +61,14 @@ func Load() (*Config, error) {
 		},
 		OpenAI: OpenAIConfig{
 			EmbedModel: "text-embedding-3-small",
+			ChatModel:  "gpt-4o",
 		},
 		ChatLLM: "ollama",
 		Claude: ClaudeConfig{
 			Model: "claude-sonnet-4-6",
+		},
+		MiniMax: MiniMaxConfig{
+			Model: "MiniMax-M2.7-highspeed",
 		},
 		Ignore: []string{
 			".git", "node_modules", "vendor", ".venv", "__pycache__",
@@ -83,6 +94,12 @@ func Load() (*Config, error) {
 	}
 	if key := viper.GetString("ANTHROPIC_API_KEY"); key != "" {
 		cfg.Claude.APIKey = key
+	}
+	if key := viper.GetString("MINIMAX_API_KEY"); key != "" {
+		cfg.MiniMax.APIKey = key
+	}
+	if key := viper.GetString("MEALFIT_MINIMAX"); key != "" && cfg.MiniMax.APIKey == "" {
+		cfg.MiniMax.APIKey = key
 	}
 
 	return cfg, nil

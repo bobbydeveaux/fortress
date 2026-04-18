@@ -10,11 +10,15 @@ openai:
   api_key: ""
   embed_model: text-embedding-3-small
 
-chat_llm: ollama
+chat_llm: openai
 
 claude:
   api_key: ""
   model: claude-sonnet-4-6
+
+minimax:
+  api_key: ""
+  model: MiniMax-M2.7-highspeed
 
 ignore:
   - .git
