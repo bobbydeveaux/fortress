@@ -103,8 +103,8 @@ export default function Hero() {
           <a href="#solution">Solution</a>
           <a href="#features">Features</a>
           <a href="#platform-teams">Platform Teams</a>
-          <a href="#how-it-works">How It Works</a>
-          <a className="nav-cta" href="#get-started">Get Started</a>
+          <a href="/docs">Docs</a>
+          <a className="nav-cta" href="/docs/quickstart">Get Started</a>
         </div>
       </nav>
 
