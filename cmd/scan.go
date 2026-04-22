@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bobbydeveaux/fortress/internal/chunker"
+	"github.com/bobbydeveaux/fortress/internal/datasource/confluence"
 	"github.com/bobbydeveaux/fortress/internal/docs"
 	"github.com/bobbydeveaux/fortress/internal/embedder"
 	"github.com/bobbydeveaux/fortress/internal/scanner"
@@ -25,15 +26,17 @@ var scanCmd = &cobra.Command{
 }
 
 var (
-	scanDryRun bool
-	scanFull   bool
-	scanUpload string
+	scanDryRun    bool
+	scanFull      bool
+	scanUpload    string
+	scanConfluence bool
 )
 
 func init() {
 	scanCmd.Flags().BoolVar(&scanDryRun, "dry-run", false, "Preview what would be scanned")
 	scanCmd.Flags().BoolVar(&scanFull, "full", false, "Force full re-scan")
 	scanCmd.Flags().StringVar(&scanUpload, "upload", "", "Upload DB to cloud storage URI after scan")
+	scanCmd.Flags().BoolVar(&scanConfluence, "confluence", false, "Also scan Confluence spaces")
 	scanCmd.Flags().Bool("ci", false, "CI mode")
 	rootCmd.AddCommand(scanCmd)
 }
@@ -136,6 +139,38 @@ func runScan(cmd *cobra.Command, args []string) error {
 			},
 		}
 		documents = append(documents, gitDoc)
+	}
+
+	// Scan Confluence if configured
+	if scanConfluence && cfg.Confluence.BaseURL != "" {
+		cyan.Println("Scanning Confluence...")
+		cp := confluence.New(
+			cfg.Confluence.BaseURL,
+			cfg.Confluence.Email,
+			cfg.Confluence.APIToken,
+			cfg.Confluence.SpaceKeys,
+		)
+		cDocCh, cErrCh := cp.Scan(ctx)
+
+		go func() {
+			for err := range cErrCh {
+				fmt.Fprintf(os.Stderr, "Confluence error: %v\n", err)
+				scanErrors = append(scanErrors, err)
+			}
+		}()
+
+		var confluenceCount int
+		for doc := range cDocCh {
+			if !scanFull {
+				existingHash, _ := db.GetContentHash(ctx, doc.ID)
+				if existingHash == doc.ContentHash {
+					continue
+				}
+			}
+			documents = append(documents, doc)
+			confluenceCount++
+		}
+		fmt.Printf("Found %s Confluence pages to index\n", color.YellowString("%d", confluenceCount))
 	}
 
 	if len(documents) == 0 {

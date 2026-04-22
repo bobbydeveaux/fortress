@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+
 	"github.com/spf13/viper"
 )
 
@@ -10,7 +12,8 @@ type Config struct {
 	OpenAI   OpenAIConfig `mapstructure:"openai"`
 	ChatLLM  string       `mapstructure:"chat_llm"`
 	Claude   ClaudeConfig  `mapstructure:"claude"`
-	MiniMax  MiniMaxConfig `mapstructure:"minimax"`
+	MiniMax    MiniMaxConfig    `mapstructure:"minimax"`
+	Confluence ConfluenceConfig `mapstructure:"confluence"`
 
 	Ignore []string `mapstructure:"ignore"`
 
@@ -51,6 +54,13 @@ type MiniMaxConfig struct {
 	Model  string `mapstructure:"model"`
 }
 
+type ConfluenceConfig struct {
+	BaseURL   string   `mapstructure:"base_url"`
+	Email     string   `mapstructure:"email"`
+	APIToken  string   `mapstructure:"api_token"`
+	SpaceKeys []string `mapstructure:"space_keys"`
+}
+
 func Load() (*Config, error) {
 	cfg := &Config{
 		Embedder: "ollama",
@@ -89,17 +99,23 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	if key := viper.GetString("OPENAI_API_KEY"); key != "" {
+	if key := os.Getenv("OPENAI_API_KEY"); key != "" && cfg.OpenAI.APIKey == "" {
 		cfg.OpenAI.APIKey = key
 	}
-	if key := viper.GetString("ANTHROPIC_API_KEY"); key != "" {
+	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" && cfg.Claude.APIKey == "" {
 		cfg.Claude.APIKey = key
 	}
-	if key := viper.GetString("MINIMAX_API_KEY"); key != "" {
+	if key := os.Getenv("MINIMAX_API_KEY"); key != "" && cfg.MiniMax.APIKey == "" {
 		cfg.MiniMax.APIKey = key
 	}
-	if key := viper.GetString("MEALFIT_MINIMAX"); key != "" && cfg.MiniMax.APIKey == "" {
+	if key := os.Getenv("MEALFIT_MINIMAX"); key != "" && cfg.MiniMax.APIKey == "" {
 		cfg.MiniMax.APIKey = key
+	}
+	if token := os.Getenv("TT_RES_CONFLUENCE"); token != "" && cfg.Confluence.APIToken == "" {
+		cfg.Confluence.APIToken = token
+	}
+	if token := os.Getenv("CONFLUENCE_API_TOKEN"); token != "" && cfg.Confluence.APIToken == "" {
+		cfg.Confluence.APIToken = token
 	}
 
 	return cfg, nil

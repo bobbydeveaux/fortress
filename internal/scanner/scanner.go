@@ -34,6 +34,14 @@ const (
 	FileTypeConfig     FileType = "config"
 	FileTypeGitHistory FileType = "git_history"
 	FileTypeData       FileType = "data"
+	FileTypeWiki       FileType = "wiki"
+)
+
+type SourceType string
+
+const (
+	SourceTypeFilesystem SourceType = "filesystem"
+	SourceTypeConfluence SourceType = "confluence"
 )
 
 type Document struct {
@@ -45,6 +53,7 @@ type Document struct {
 	Category    Category
 	Language    string
 	FileType    FileType
+	SourceType  SourceType
 	Content     string
 	ContentHash string
 	ModTime     time.Time
@@ -180,6 +189,7 @@ func (s *Scanner) scanFile(absPath, relPath string) (*Document, error) {
 		Category:    cat,
 		Language:    lang,
 		FileType:    ft,
+		SourceType:  SourceTypeFilesystem,
 		Content:     contentStr,
 		ContentHash: hash,
 		ModTime:     info.ModTime(),

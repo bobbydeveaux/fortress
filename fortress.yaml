@@ -20,6 +20,13 @@ minimax:
   api_key: ""
   model: MiniMax-M2.7-highspeed
 
+confluence:
+  base_url: https://toucanberry.atlassian.net/wiki
+  email: bobby.deveaux@toucanberry.com
+  api_token: ""
+  space_keys:
+    - RES
+
 ignore:
   - .git
   - node_modules

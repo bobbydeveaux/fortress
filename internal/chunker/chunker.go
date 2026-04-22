@@ -57,7 +57,7 @@ func (d *Dispatcher) Chunk(doc scanner.Document) ([]Chunk, error) {
 	switch doc.FileType {
 	case scanner.FileTypeCode:
 		rawChunks, err = d.codeChunker.chunk(doc.Content, doc.Language)
-	case scanner.FileTypeMarkdown:
+	case scanner.FileTypeMarkdown, scanner.FileTypeWiki:
 		rawChunks, err = d.markdownChunker.chunk(doc.Content)
 	case scanner.FileTypeConfig:
 		rawChunks, err = d.configChunker.chunk(doc.Content)
