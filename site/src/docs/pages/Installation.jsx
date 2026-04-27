@@ -10,22 +10,33 @@ export default function Installation() {
         <li>Or an <strong>OpenAI API key</strong> for cloud-based embeddings</li>
       </ul>
 
+      <h2>Install via Go</h2>
+      <p>
+        Fortress requires CGO and the <code>sqlite_fts5</code> build tag for full-text search:
+      </p>
+      <Code>{`CGO_ENABLED=1 go install -tags sqlite_fts5 github.com/bobbydeveaux/fortress@latest`}</Code>
+
+      <Callout type="warning">
+        <strong>The build tag is required.</strong> Without <code>-tags sqlite_fts5</code>, full-text
+        search won't work and you'll get a "no such module: fts5" error.
+      </Callout>
+
+      <p>Make sure the Go bin directory is in your PATH:</p>
+      <Code>{`export PATH=$PATH:$(go env GOPATH)/bin`}</Code>
+
       <h2>Install from source</h2>
       <Code>{`# Clone the repo
 git clone https://github.com/bobbydeveaux/fortress.git
 cd fortress
 
-# Build the binary
-go build -o fortress .
+# Build the binary (CGO + FTS5 required)
+CGO_ENABLED=1 go build -tags sqlite_fts5 -o fortress .
 
 # Move to your PATH
 sudo mv fortress /usr/local/bin/
 
 # Verify
 fortress --help`}</Code>
-
-      <h2>Install via Go</h2>
-      <Code>{`go install github.com/bobbydeveaux/fortress@latest`}</Code>
 
       <h2>Set up Ollama (recommended)</h2>
       <p>

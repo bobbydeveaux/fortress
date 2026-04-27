@@ -108,12 +108,6 @@ func Load() (*Config, error) {
 	if key := os.Getenv("MINIMAX_API_KEY"); key != "" && cfg.MiniMax.APIKey == "" {
 		cfg.MiniMax.APIKey = key
 	}
-	if key := os.Getenv("MEALFIT_MINIMAX"); key != "" && cfg.MiniMax.APIKey == "" {
-		cfg.MiniMax.APIKey = key
-	}
-	if token := os.Getenv("TT_RES_CONFLUENCE"); token != "" && cfg.Confluence.APIToken == "" {
-		cfg.Confluence.APIToken = token
-	}
 	if token := os.Getenv("CONFLUENCE_API_TOKEN"); token != "" && cfg.Confluence.APIToken == "" {
 		cfg.Confluence.APIToken = token
 	}
