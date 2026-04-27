@@ -18,7 +18,7 @@ export default function HowItWorks() {
                 <span className="terminal-title">Terminal</span>
               </div>
               <div className="terminal-body">
-                <span className="prompt">$</span> <span className="cmd">go install github.com/bobbydeveaux/fortress@latest</span>
+                <span className="prompt">$</span> <span className="cmd">CGO_ENABLED=1 go install -tags sqlite_fts5 github.com/bobbydeveaux/fortress@latest</span>
               </div>
             </div>
           </div>
