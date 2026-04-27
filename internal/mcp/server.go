@@ -56,6 +56,11 @@ func (s *Server) Serve(ctx context.Context) error {
 			continue
 		}
 
+		// Notifications have no ID — don't respond to them
+		if req.ID == nil || string(req.ID) == "null" {
+			continue
+		}
+
 		resp := s.handle(ctx, req)
 		if err := enc.Encode(resp); err != nil {
 			return fmt.Errorf("encoding response: %w", err)
