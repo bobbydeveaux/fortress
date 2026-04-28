@@ -7,3 +7,8 @@ frontend:
   dir: site
 
 database: false
+
+quality:
+  max_ccn: 25
+  max_cognitive: 30
+  max_duplication: 12
