@@ -111,33 +111,32 @@ func DetectFileType(path string, language string) FileType {
 	return FileTypeData
 }
 
+var dirCategoryMap = map[string]Category{
+	"api": CategoryAPI, "apis": CategoryAPI, "handlers": CategoryAPI, "routes": CategoryAPI, "controllers": CategoryAPI,
+	"infra": CategoryInfra, "infrastructure": CategoryInfra, "terraform": CategoryInfra, "deploy": CategoryInfra, "k8s": CategoryInfra, "kubernetes": CategoryInfra, "helm": CategoryInfra,
+	"frontend": CategoryFrontend, "ui": CategoryFrontend, "web": CategoryFrontend, "client": CategoryFrontend, "components": CategoryFrontend, "pages": CategoryFrontend,
+	"test": CategoryTesting, "tests": CategoryTesting, "testing": CategoryTesting, "spec": CategoryTesting, "specs": CategoryTesting, "__tests__": CategoryTesting,
+	"docs": CategoryDocs, "documentation": CategoryDocs, "doc": CategoryDocs,
+	"config": CategoryConfig, "configs": CategoryConfig, "configuration": CategoryConfig,
+	"migrations": CategoryMigrations, "migrate": CategoryMigrations, "schema": CategoryMigrations,
+}
+
+var testFileSuffixes = []string{"_test.go", ".test.js", ".test.ts", ".spec.js", ".spec.ts", "_spec.rb"}
+
 func DetectCategory(relPath string, language string, ft FileType) Category {
 	lower := strings.ToLower(relPath)
 	parts := strings.Split(lower, string(filepath.Separator))
 
 	for _, part := range parts {
-		switch {
-		case part == "api" || part == "apis" || part == "handlers" || part == "routes" || part == "controllers":
-			return CategoryAPI
-		case part == "infra" || part == "infrastructure" || part == "terraform" || part == "deploy" || part == "k8s" || part == "kubernetes" || part == "helm":
-			return CategoryInfra
-		case part == "frontend" || part == "ui" || part == "web" || part == "client" || part == "components" || part == "pages":
-			return CategoryFrontend
-		case part == "test" || part == "tests" || part == "testing" || part == "spec" || part == "specs" || part == "__tests__":
-			return CategoryTesting
-		case part == "docs" || part == "documentation" || part == "doc":
-			return CategoryDocs
-		case part == "config" || part == "configs" || part == "configuration":
-			return CategoryConfig
-		case part == "migrations" || part == "migrate" || part == "schema":
-			return CategoryMigrations
+		if cat, ok := dirCategoryMap[part]; ok {
+			return cat
 		}
 	}
 
-	if strings.HasSuffix(lower, "_test.go") || strings.HasSuffix(lower, ".test.js") ||
-		strings.HasSuffix(lower, ".test.ts") || strings.HasSuffix(lower, ".spec.js") ||
-		strings.HasSuffix(lower, ".spec.ts") || strings.HasSuffix(lower, "_spec.rb") {
-		return CategoryTesting
+	for _, suffix := range testFileSuffixes {
+		if strings.HasSuffix(lower, suffix) {
+			return CategoryTesting
+		}
 	}
 
 	if ft == FileTypeMarkdown {

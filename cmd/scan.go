@@ -26,9 +26,9 @@ var scanCmd = &cobra.Command{
 }
 
 var (
-	scanDryRun    bool
-	scanFull      bool
-	scanUpload    string
+	scanDryRun     bool
+	scanFull       bool
+	scanUpload     string
 	scanConfluence bool
 )
 
@@ -41,45 +41,23 @@ func init() {
 	rootCmd.AddCommand(scanCmd)
 }
 
-func runScan(cmd *cobra.Command, args []string) error {
-	path := "."
-	if len(args) > 0 {
-		path = args[0]
-	}
-
-	ctx := context.Background()
-
-	// Create embedder
-	var emb embedder.Embedder
+func createEmbedder() (embedder.Embedder, error) {
 	switch cfg.Embedder {
 	case "openai":
 		if cfg.OpenAI.APIKey == "" {
-			return fmt.Errorf("OpenAI API key required (set OPENAI_API_KEY or configure in fortress.yaml)")
+			return nil, fmt.Errorf("OpenAI API key required (set OPENAI_API_KEY or configure in fortress.yaml)")
 		}
-		emb = embedder.NewOpenAI(cfg.OpenAI.APIKey, cfg.OpenAI.EmbedModel)
+		return embedder.NewOpenAI(cfg.OpenAI.APIKey, cfg.OpenAI.EmbedModel), nil
 	default:
-		emb = embedder.NewOllama(cfg.Ollama.URL, cfg.Ollama.EmbedModel)
+		return embedder.NewOllama(cfg.Ollama.URL, cfg.Ollama.EmbedModel), nil
 	}
+}
 
-	// Create store
-	db, err := store.New(cfg.DBPath, emb.Dimensions())
-	if err != nil {
-		return fmt.Errorf("opening database: %w", err)
-	}
-	defer db.Close()
-
-	// Create scanner
-	sc := scanner.New(cfg)
-
-	cyan := color.New(color.FgCyan)
-	cyan.Printf("Scanning %s...\n", path)
-
+func collectDocuments(ctx context.Context, sc *scanner.Scanner, db store.Store, path string) ([]scanner.Document, []error) {
 	docCh, errCh := sc.Scan(ctx, path)
 
-	// Collect documents
 	var documents []scanner.Document
 	var scanErrors []error
-	var dryRunCount int
 
 	go func() {
 		for err := range errCh {
@@ -90,97 +68,95 @@ func runScan(cmd *cobra.Command, args []string) error {
 	for doc := range docCh {
 		if scanDryRun {
 			fmt.Printf("  %s [%s/%s]\n", doc.RelPath, doc.FileType, doc.Category)
-			dryRunCount++
 			continue
 		}
-
 		if !scanFull {
 			existingHash, _ := db.GetContentHash(ctx, doc.ID)
 			if existingHash == doc.ContentHash {
 				continue
 			}
 		}
-
 		documents = append(documents, doc)
 	}
 
-	if scanDryRun {
-		fmt.Printf("\nWould scan %d files\n", dryRunCount)
-		return nil
-	}
+	return documents, scanErrors
+}
 
-	// Extract git history as documents
-	gitRepos := make(map[string]string) // repo name -> repo root
+func extractGitHistory(documents []scanner.Document) []scanner.Document {
+	gitRepos := make(map[string]string)
 	for _, doc := range documents {
 		if doc.Repo != "" && doc.RepoRoot != "" {
 			gitRepos[doc.Repo] = doc.RepoRoot
 		}
 	}
+
+	var gitDocs []scanner.Document
 	for repoName, repoRoot := range gitRepos {
 		info, err := scanner.ExtractGitInfo(repoRoot, 200)
 		if err != nil || info.Log == "" {
 			continue
 		}
-		gitDocID := hashPath("git-history:" + repoName)
-		gitDoc := scanner.Document{
-			ID:          gitDocID,
+		gitDocs = append(gitDocs, scanner.Document{
+			ID:          hashPath("git-history:" + repoName),
 			Path:        repoRoot + "/.git/log",
 			RelPath:     ".git-history/" + repoName,
 			Repo:        repoName,
 			RepoRoot:    repoRoot,
 			Category:    scanner.CategoryDocs,
-			Language:    "",
 			FileType:    scanner.FileTypeGitHistory,
+			SourceType:  scanner.SourceTypeFilesystem,
 			Content:     fmt.Sprintf("[REPO: %s] Git History\n\n%s", repoName, info.Log),
 			ContentHash: hashPath(info.Log),
 			Metadata: map[string]string{
 				"remote_url": info.RemoteURL,
 				"head_sha":   info.LastCommitSHA,
 			},
+		})
+	}
+	return gitDocs
+}
+
+func scanConfluencePages(ctx context.Context, db store.Store) ([]scanner.Document, []error) {
+	if !scanConfluence || cfg.Confluence.BaseURL == "" {
+		return nil, nil
+	}
+
+	cyan := color.New(color.FgCyan)
+	cyan.Println("Scanning Confluence...")
+
+	cp := confluence.New(
+		cfg.Confluence.BaseURL,
+		cfg.Confluence.Email,
+		cfg.Confluence.APIToken,
+		cfg.Confluence.SpaceKeys,
+	)
+	cDocCh, cErrCh := cp.Scan(ctx)
+
+	var documents []scanner.Document
+	var scanErrors []error
+
+	go func() {
+		for err := range cErrCh {
+			fmt.Fprintf(os.Stderr, "Confluence error: %v\n", err)
+			scanErrors = append(scanErrors, err)
 		}
-		documents = append(documents, gitDoc)
-	}
+	}()
 
-	// Scan Confluence if configured
-	if scanConfluence && cfg.Confluence.BaseURL != "" {
-		cyan.Println("Scanning Confluence...")
-		cp := confluence.New(
-			cfg.Confluence.BaseURL,
-			cfg.Confluence.Email,
-			cfg.Confluence.APIToken,
-			cfg.Confluence.SpaceKeys,
-		)
-		cDocCh, cErrCh := cp.Scan(ctx)
-
-		go func() {
-			for err := range cErrCh {
-				fmt.Fprintf(os.Stderr, "Confluence error: %v\n", err)
-				scanErrors = append(scanErrors, err)
+	for doc := range cDocCh {
+		if !scanFull {
+			existingHash, _ := db.GetContentHash(ctx, doc.ID)
+			if existingHash == doc.ContentHash {
+				continue
 			}
-		}()
-
-		var confluenceCount int
-		for doc := range cDocCh {
-			if !scanFull {
-				existingHash, _ := db.GetContentHash(ctx, doc.ID)
-				if existingHash == doc.ContentHash {
-					continue
-				}
-			}
-			documents = append(documents, doc)
-			confluenceCount++
 		}
-		fmt.Printf("Found %s Confluence pages to index\n", color.YellowString("%d", confluenceCount))
+		documents = append(documents, doc)
 	}
+	fmt.Printf("Found %s Confluence pages to index\n", color.YellowString("%d", len(documents)))
 
-	if len(documents) == 0 {
-		fmt.Println("No changes detected.")
-		return nil
-	}
+	return documents, scanErrors
+}
 
-	fmt.Printf("Processing %s files...\n", color.YellowString("%d", len(documents)))
-
-	// Chunk all documents
+func chunkDocuments(documents []scanner.Document) ([]chunker.Chunk, map[string][]chunker.Chunk) {
 	dispatcher := chunker.NewDispatcher(cfg.ChunkSize)
 	var allChunks []chunker.Chunk
 	docChunks := make(map[string][]chunker.Chunk)
@@ -194,10 +170,10 @@ func runScan(cmd *cobra.Command, args []string) error {
 		allChunks = append(allChunks, chunks...)
 		docChunks[doc.ID] = chunks
 	}
+	return allChunks, docChunks
+}
 
-	fmt.Printf("Generated %s chunks, embedding...\n", color.YellowString("%d", len(allChunks)))
-
-	// Embed all chunks
+func embedChunks(ctx context.Context, emb embedder.Embedder, allChunks []chunker.Chunk) ([]chunker.Chunk, error) {
 	pool := embedder.NewPool(emb, cfg.EmbedWorkers, cfg.EmbedBatchSize)
 
 	bar := progressbar.NewOptions(len(allChunks),
@@ -206,24 +182,16 @@ func runScan(cmd *cobra.Command, args []string) error {
 		progressbar.OptionSetWidth(40),
 	)
 
-	embeddedChunks, err := pool.EmbedChunks(ctx, allChunks, func(n int) {
+	embedded, err := pool.EmbedChunks(ctx, allChunks, func(n int) {
 		bar.Add(n)
 	})
-	if err != nil {
-		return fmt.Errorf("embedding: %w", err)
-	}
 	bar.Finish()
 	fmt.Println()
 
-	// Rebuild docChunks map with embeddings
-	idx := 0
-	for _, doc := range documents {
-		n := len(docChunks[doc.ID])
-		docChunks[doc.ID] = embeddedChunks[idx : idx+n]
-		idx += n
-	}
+	return embedded, err
+}
 
-	// Store documents
+func storeDocuments(ctx context.Context, db store.Store, documents []scanner.Document, docChunks map[string][]chunker.Chunk) {
 	fmt.Println("Storing documents...")
 	repoChunks := make(map[string]int)
 	repoFiles := make(map[string]int)
@@ -240,7 +208,10 @@ func runScan(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Update scan state per repo
+	updateScanState(ctx, db, documents, repoFiles, repoChunks)
+}
+
+func updateScanState(ctx context.Context, db store.Store, documents []scanner.Document, repoFiles, repoChunks map[string]int) {
 	for repo, fileCount := range repoFiles {
 		state := store.ScanState{
 			Repo:         repo,
@@ -248,7 +219,6 @@ func runScan(cmd *cobra.Command, args []string) error {
 			FileCount:    fileCount,
 			ChunkCount:   repoChunks[repo],
 		}
-		// Try to get the latest commit SHA
 		for _, doc := range documents {
 			if doc.Repo == repo && doc.RepoRoot != "" {
 				info, err := scanner.ExtractGitInfo(doc.RepoRoot, 0)
@@ -260,22 +230,12 @@ func runScan(cmd *cobra.Command, args []string) error {
 		}
 		db.UpdateScanState(ctx, state)
 	}
+}
 
-	// Generate docs
-	fmt.Println("Generating documentation...")
-	gen := docs.NewGenerator(db, cfg.DocsPath)
-	if err := gen.Generate(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: generating docs: %v\n", err)
-	}
-
-	// Upload if requested
-	if scanUpload != "" {
-		fmt.Printf("Uploading to %s...\n", scanUpload)
-		// Cloud storage upload handled separately
-	}
-
+func printStats(ctx context.Context, db store.Store) {
 	stats, _ := db.GetStats(ctx)
 
+	cyan := color.New(color.FgCyan)
 	green := color.New(color.FgGreen, color.Bold)
 	yellow := color.New(color.FgYellow)
 	dim := color.New(color.FgHiBlack)
@@ -293,6 +253,82 @@ func runScan(cmd *cobra.Command, args []string) error {
 	yellow.Printf("%d\n", stats.Categories)
 	dim.Print("  DB size:    ")
 	cyan.Printf("%.2f MB\n", stats.DBSizeMB)
+}
+
+func runScan(cmd *cobra.Command, args []string) error {
+	path := "."
+	if len(args) > 0 {
+		path = args[0]
+	}
+
+	ctx := context.Background()
+
+	emb, err := createEmbedder()
+	if err != nil {
+		return err
+	}
+
+	db, err := store.New(cfg.DBPath, emb.Dimensions())
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer db.Close()
+
+	sc := scanner.New(cfg)
+
+	cyan := color.New(color.FgCyan)
+	cyan.Printf("Scanning %s...\n", path)
+
+	documents, scanErrors := collectDocuments(ctx, sc, db, path)
+
+	if scanDryRun {
+		fmt.Printf("\nWould scan %d files\n", len(documents))
+		return nil
+	}
+
+	documents = append(documents, extractGitHistory(documents)...)
+
+	cDocs, cErrs := scanConfluencePages(ctx, db)
+	documents = append(documents, cDocs...)
+	scanErrors = append(scanErrors, cErrs...)
+
+	if len(documents) == 0 {
+		fmt.Println("No changes detected.")
+		return nil
+	}
+
+	fmt.Printf("Processing %s files...\n", color.YellowString("%d", len(documents)))
+
+	allChunks, docChunks := chunkDocuments(documents)
+
+	fmt.Printf("Generated %s chunks, embedding...\n", color.YellowString("%d", len(allChunks)))
+
+	embeddedChunks, err := embedChunks(ctx, emb, allChunks)
+	if err != nil {
+		return fmt.Errorf("embedding: %w", err)
+	}
+
+	// Rebuild docChunks map with embeddings
+	idx := 0
+	for _, doc := range documents {
+		n := len(docChunks[doc.ID])
+		docChunks[doc.ID] = embeddedChunks[idx : idx+n]
+		idx += n
+	}
+
+	storeDocuments(ctx, db, documents, docChunks)
+
+	fmt.Println("Generating documentation...")
+	gen := docs.NewGenerator(db, cfg.DocsPath)
+	if err := gen.Generate(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: generating docs: %v\n", err)
+	}
+
+	if scanUpload != "" {
+		fmt.Printf("Uploading to %s...\n", scanUpload)
+	}
+
+	printStats(ctx, db)
 
 	if len(scanErrors) > 0 {
 		fmt.Fprintf(os.Stderr, "\n%d scan errors (non-fatal)\n", len(scanErrors))
