@@ -140,19 +140,38 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc scanner.Document, 
 	}
 	defer tx.Rollback()
 
-	// Upsert repo if present
-	if doc.Repo != "" {
-		_, err = tx.ExecContext(ctx,
-			`INSERT INTO repos (id, root_path, remote_url, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-			 ON CONFLICT(id) DO UPDATE SET root_path=excluded.root_path, remote_url=excluded.remote_url, updated_at=CURRENT_TIMESTAMP`,
-			doc.Repo, doc.RepoRoot, doc.Metadata["remote_url"])
-		if err != nil {
-			return fmt.Errorf("upserting repo: %w", err)
-		}
+	if err := s.upsertRepo(ctx, tx, doc); err != nil {
+		return err
+	}
+	if err := s.deleteOldChunks(ctx, tx, doc.ID); err != nil {
+		return err
+	}
+	if err := s.upsertDocRow(ctx, tx, doc); err != nil {
+		return err
+	}
+	if err := s.insertChunks(ctx, tx, chunks); err != nil {
+		return err
 	}
 
-	// Delete existing chunks for this document
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM chunks WHERE document_id = ?`, doc.ID)
+	return tx.Commit()
+}
+
+func (s *SQLiteStore) upsertRepo(ctx context.Context, tx *sql.Tx, doc scanner.Document) error {
+	if doc.Repo == "" {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO repos (id, root_path, remote_url, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+		 ON CONFLICT(id) DO UPDATE SET root_path=excluded.root_path, remote_url=excluded.remote_url, updated_at=CURRENT_TIMESTAMP`,
+		doc.Repo, doc.RepoRoot, doc.Metadata["remote_url"])
+	if err != nil {
+		return fmt.Errorf("upserting repo: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) deleteOldChunks(ctx context.Context, tx *sql.Tx, docID string) error {
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM chunks WHERE document_id = ?`, docID)
 	if err != nil {
 		return err
 	}
@@ -170,12 +189,14 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc scanner.Document, 
 		}
 		tx.ExecContext(ctx, `DELETE FROM chunks_fts WHERE chunk_id = ?`, cid)
 	}
-	tx.ExecContext(ctx, `DELETE FROM chunks WHERE document_id = ?`, doc.ID)
+	tx.ExecContext(ctx, `DELETE FROM chunks WHERE document_id = ?`, docID)
+	return nil
+}
 
-	// Upsert document
+func (s *SQLiteStore) upsertDocRow(ctx context.Context, tx *sql.Tx, doc scanner.Document) error {
 	metaJSON, _ := json.Marshal(doc.Metadata)
 	repoID := sql.NullString{String: doc.Repo, Valid: doc.Repo != ""}
-	_, err = tx.ExecContext(ctx,
+	_, err := tx.ExecContext(ctx,
 		`INSERT INTO documents (id, path, rel_path, repo_id, category, language, file_type, content, content_hash, metadata, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		 ON CONFLICT(id) DO UPDATE SET
@@ -188,40 +209,51 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc scanner.Document, 
 	if err != nil {
 		return fmt.Errorf("upserting document: %w", err)
 	}
+	return nil
+}
 
-	// Insert chunks
+func (s *SQLiteStore) insertChunks(ctx context.Context, tx *sql.Tx, chunks []chunker.Chunk) error {
 	for _, c := range chunks {
-		_, err = tx.ExecContext(ctx,
-			`INSERT INTO chunks (id, document_id, content, start_line, end_line) VALUES (?, ?, ?, ?, ?)`,
-			c.ID, c.DocumentID, c.Content, c.StartLine, c.EndLine)
-		if err != nil {
-			return fmt.Errorf("inserting chunk: %w", err)
-		}
-
-		// Insert FTS
-		_, err = tx.ExecContext(ctx,
-			`INSERT INTO chunks_fts (content, document_id, chunk_id) VALUES (?, ?, ?)`,
-			c.Content, c.DocumentID, c.ID)
-		if err != nil {
-			return fmt.Errorf("inserting FTS: %w", err)
-		}
-
-		// Insert embedding if present and vec extension available
-		if len(c.Embedding) > 0 && s.vecAvailable {
-			vecBytes, err := sqlite_vec.SerializeFloat32(c.Embedding)
-			if err != nil {
-				return fmt.Errorf("serializing embedding: %w", err)
-			}
-			_, err = tx.ExecContext(ctx,
-				`INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (?, ?)`,
-				c.ID, vecBytes)
-			if err != nil {
-				return fmt.Errorf("inserting embedding: %w", err)
-			}
+		if err := s.insertSingleChunk(ctx, tx, c); err != nil {
+			return err
 		}
 	}
+	return nil
+}
 
-	return tx.Commit()
+func (s *SQLiteStore) insertSingleChunk(ctx context.Context, tx *sql.Tx, c chunker.Chunk) error {
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO chunks (id, document_id, content, start_line, end_line) VALUES (?, ?, ?, ?, ?)`,
+		c.ID, c.DocumentID, c.Content, c.StartLine, c.EndLine)
+	if err != nil {
+		return fmt.Errorf("inserting chunk: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO chunks_fts (content, document_id, chunk_id) VALUES (?, ?, ?)`,
+		c.Content, c.DocumentID, c.ID)
+	if err != nil {
+		return fmt.Errorf("inserting FTS: %w", err)
+	}
+
+	if len(c.Embedding) > 0 && s.vecAvailable {
+		return s.insertChunkEmbedding(ctx, tx, c)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) insertChunkEmbedding(ctx context.Context, tx *sql.Tx, c chunker.Chunk) error {
+	vecBytes, err := sqlite_vec.SerializeFloat32(c.Embedding)
+	if err != nil {
+		return fmt.Errorf("serializing embedding: %w", err)
+	}
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO chunk_embeddings (chunk_id, embedding) VALUES (?, ?)`,
+		c.ID, vecBytes)
+	if err != nil {
+		return fmt.Errorf("inserting embedding: %w", err)
+	}
+	return nil
 }
 
 func (s *SQLiteStore) DeleteDocument(ctx context.Context, docID string) error {

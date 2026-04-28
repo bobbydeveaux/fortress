@@ -27,6 +27,18 @@ func init() {
 	rootCmd.AddCommand(watchCmd)
 }
 
+type watchDeps struct {
+	ctx     context.Context
+	sc      *scanner.Scanner
+	disp    *chunker.Dispatcher
+	pool    *embedder.Pool
+	db      store.Store
+	ignorer *scanner.Ignorer
+	absPath string
+	mu      sync.Mutex
+	pending map[string]*time.Timer
+}
+
 func runWatch(cmd *cobra.Command, args []string) error {
 	path := "."
 	if len(args) > 0 {
@@ -38,25 +50,13 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx := context.Background()
-
-	var emb embedder.Embedder
-	switch cfg.Embedder {
-	case "openai":
-		emb = embedder.NewOpenAI(cfg.OpenAI.APIKey, cfg.OpenAI.EmbedModel)
-	default:
-		emb = embedder.NewOllama(cfg.Ollama.URL, cfg.Ollama.EmbedModel)
-	}
+	emb := newEmbedder()
 
 	db, err := store.New(cfg.DBPath, emb.Dimensions())
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
 	}
 	defer db.Close()
-
-	sc := scanner.New(cfg)
-	disp := chunker.NewDispatcher(cfg.ChunkSize)
-	pool := embedder.NewPool(emb, cfg.EmbedWorkers, cfg.EmbedBatchSize)
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -70,78 +70,35 @@ func runWatch(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Watching %s for changes...\n", absPath)
 
-	// Debounce map
-	var mu sync.Mutex
-	pending := make(map[string]*time.Timer)
+	deps := &watchDeps{
+		ctx:     context.Background(),
+		sc:      scanner.New(cfg),
+		disp:    chunker.NewDispatcher(cfg.ChunkSize),
+		pool:    embedder.NewPool(emb, cfg.EmbedWorkers, cfg.EmbedBatchSize),
+		db:      db,
+		ignorer: scanner.NewIgnorer(cfg.Ignore),
+		absPath: absPath,
+		pending: make(map[string]*time.Timer),
+	}
 
-	ignorer := scanner.NewIgnorer(cfg.Ignore)
+	return watchLoop(deps, watcher)
+}
 
+func newEmbedder() embedder.Embedder {
+	if cfg.Embedder == "openai" {
+		return embedder.NewOpenAI(cfg.OpenAI.APIKey, cfg.OpenAI.EmbedModel)
+	}
+	return embedder.NewOllama(cfg.Ollama.URL, cfg.Ollama.EmbedModel)
+}
+
+func watchLoop(deps *watchDeps, watcher *fsnotify.Watcher) error {
 	for {
 		select {
 		case event, ok := <-watcher.Events:
 			if !ok {
 				return nil
 			}
-
-			relPath, _ := filepath.Rel(absPath, event.Name)
-			if ignorer.ShouldIgnore(relPath, false) {
-				continue
-			}
-
-			mu.Lock()
-			if t, exists := pending[event.Name]; exists {
-				t.Stop()
-			}
-
-			switch {
-			case event.Has(fsnotify.Write) || event.Has(fsnotify.Create):
-				pending[event.Name] = time.AfterFunc(500*time.Millisecond, func() {
-					mu.Lock()
-					delete(pending, event.Name)
-					mu.Unlock()
-
-					doc, err := sc.ScanFile(event.Name)
-					if err != nil {
-						log.Printf("Error scanning %s: %v", event.Name, err)
-						return
-					}
-
-					chunks, err := disp.Chunk(*doc)
-					if err != nil {
-						log.Printf("Error chunking %s: %v", event.Name, err)
-						return
-					}
-
-					chunks, err = pool.EmbedChunks(ctx, chunks, nil)
-					if err != nil {
-						log.Printf("Error embedding %s: %v", event.Name, err)
-						return
-					}
-
-					if err := db.UpsertDocument(ctx, *doc, chunks); err != nil {
-						log.Printf("Error storing %s: %v", event.Name, err)
-						return
-					}
-
-					fmt.Printf("  Updated: %s (%d chunks)\n", relPath, len(chunks))
-				})
-
-			case event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename):
-				pending[event.Name] = time.AfterFunc(500*time.Millisecond, func() {
-					mu.Lock()
-					delete(pending, event.Name)
-					mu.Unlock()
-
-					docID := hashPath(relPath)
-					if err := db.DeleteDocument(ctx, docID); err != nil {
-						log.Printf("Error deleting %s: %v", event.Name, err)
-						return
-					}
-					fmt.Printf("  Removed: %s\n", relPath)
-				})
-			}
-			mu.Unlock()
-
+			deps.handleEvent(event)
 		case err, ok := <-watcher.Errors:
 			if !ok {
 				return nil
@@ -149,4 +106,77 @@ func runWatch(cmd *cobra.Command, args []string) error {
 			log.Printf("Watcher error: %v", err)
 		}
 	}
+}
+
+func (d *watchDeps) handleEvent(event fsnotify.Event) {
+	relPath, _ := filepath.Rel(d.absPath, event.Name)
+	if d.ignorer.ShouldIgnore(relPath, false) {
+		return
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if t, exists := d.pending[event.Name]; exists {
+		t.Stop()
+	}
+
+	switch {
+	case event.Has(fsnotify.Write) || event.Has(fsnotify.Create):
+		d.scheduleUpdate(event.Name, relPath)
+	case event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename):
+		d.scheduleRemove(event.Name, relPath)
+	}
+}
+
+func (d *watchDeps) scheduleUpdate(name, relPath string) {
+	d.pending[name] = time.AfterFunc(500*time.Millisecond, func() {
+		d.mu.Lock()
+		delete(d.pending, name)
+		d.mu.Unlock()
+
+		d.processFileUpdate(name, relPath)
+	})
+}
+
+func (d *watchDeps) processFileUpdate(name, relPath string) {
+	doc, err := d.sc.ScanFile(name)
+	if err != nil {
+		log.Printf("Error scanning %s: %v", name, err)
+		return
+	}
+
+	chunks, err := d.disp.Chunk(*doc)
+	if err != nil {
+		log.Printf("Error chunking %s: %v", name, err)
+		return
+	}
+
+	chunks, err = d.pool.EmbedChunks(d.ctx, chunks, nil)
+	if err != nil {
+		log.Printf("Error embedding %s: %v", name, err)
+		return
+	}
+
+	if err := d.db.UpsertDocument(d.ctx, *doc, chunks); err != nil {
+		log.Printf("Error storing %s: %v", name, err)
+		return
+	}
+
+	fmt.Printf("  Updated: %s (%d chunks)\n", relPath, len(chunks))
+}
+
+func (d *watchDeps) scheduleRemove(name, relPath string) {
+	d.pending[name] = time.AfterFunc(500*time.Millisecond, func() {
+		d.mu.Lock()
+		delete(d.pending, name)
+		d.mu.Unlock()
+
+		docID := hashPath(relPath)
+		if err := d.db.DeleteDocument(d.ctx, docID); err != nil {
+			log.Printf("Error deleting %s: %v", name, err)
+			return
+		}
+		fmt.Printf("  Removed: %s\n", relPath)
+	})
 }
